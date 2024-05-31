@@ -1,0 +1,7 @@
+wheel==0.37.0
+opencv-python==4.9.0.80
+numpy==1.26.4
+scipy==1.13.1
+networkx==3.3
+tqdm==4.66.4
+configparser==7.0.0
