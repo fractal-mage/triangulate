@@ -167,6 +167,11 @@ cython_debug/
 *.gif
 *.png
 *.bmp
+*output*Sample.jpg
+*output*sample.jpg
 # Include sample images
-!*Sample.jpg
-!*sample.jpg
+!*queue*Sample.jpg
+!*queue*sample.jpg
+
+# Log Files
+log*.txt

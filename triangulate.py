@@ -8,6 +8,7 @@ import networkx as nx
 import colorsys
 from tqdm import tqdm
 import glob
+import logging
 
 def average_color(image, triangle):
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -45,10 +46,11 @@ def adjust_color(color, threshold, lightness):
     return [int(c * 255) for c in rgb_color]  # denormalize from 0-1 to 0-255 for OpenCV
 
 def divide_large_triangles(triangles, threshold, center):
+    logger = logging.getLogger('Triangulate')
     def check_triangles_format(triangles):
         for i, triangle in enumerate(triangles):
             if not isinstance(triangle, np.ndarray) or triangle.shape != (3, 2):
-                print(f"Triangle {i} is not in the correct format: {triangle}")
+                logger.error(f"Triangle {i} is not in the correct format: {triangle}")
                 return False
         return True
 
@@ -75,7 +77,6 @@ def divide_large_triangles(triangles, threshold, center):
                 processed_triangles.append(np.array([closest_vertex, opposite_side[1], midpoint]))
             else:
                 processed_triangles.append(triangle)
-
     return processed_triangles
 
 def image_to_triangles(
@@ -88,8 +89,11 @@ def image_to_triangles(
         triangle_size_threshold, 
         lightness, 
         intermediate_gen):
-    print("Reading image...")
+    logger = logging.getLogger('Triangulate')
+    logger.info("Reading image...")
     image = cv2.imread(image_path)
+    if image is None:
+        logger.error(f"Failed to read image file {image_path}.")
     base_name = os.path.basename(image_path)
     name, ext = os.path.splitext(base_name)
     
@@ -99,26 +103,26 @@ def image_to_triangles(
     os.makedirs(os.path.dirname(original_output_path), exist_ok=True)
     cv2.imwrite(original_output_path, image)
 
-    print("Adding border to image...")
+    logger.info("Adding border to image...")
     image = cv2.copyMakeBorder(image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=[0, 0, 0])
     save_intermediate_image(image, output_directory, name, 'bordered', intermediate_gen)
     
-    print("Blurring image...")
+    logger.info("Blurring image...")
     blurred = cv2.GaussianBlur(image, (blur_size, blur_size), 0)
     save_intermediate_image(blurred, output_directory, name, 'blurred', intermediate_gen)
     
-    print("Converting image to grayscale...")
+    logger.info("Converting image to grayscale...")
     gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
     save_intermediate_image(gray, output_directory, name, 'gray', intermediate_gen)
     
-    print("Detecting edges...")
+    logger.info("Detecting edges...")
     edges = cv2.Canny(gray, canny_threshold1, canny_threshold2)
     save_intermediate_image(edges, output_directory, name, 'edges', intermediate_gen)
     
-    print("Finding contours...")
+    logger.info("Finding contours...")
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    print("Processing points...")
+    logger.info("Processing points...")
     contour_points = np.vstack(contours).squeeze()
     height, width = image.shape[:2]
     
@@ -126,7 +130,7 @@ def image_to_triangles(
     border_points = np.array([[0, 0], [0, height-1], [width-1, height-1], [width-1, 0]])
     points = np.vstack([contour_points, border_points])
 
-    print("Processing triangles...")
+    logger.info("Processing triangles...")
     # Generate Delaunay triangulation
     delaunay = Delaunay(points)
     
@@ -140,17 +144,17 @@ def image_to_triangles(
     total_size = width * height
     triangle_size_threshold = total_size * (triangle_size_threshold / 100)
 
-    print("Dividing large triangles...")
+    logger.info("Dividing large triangles...")
     triangles = divide_large_triangles(triangles, triangle_size_threshold, center)
 
-    print("Initializing output image...")
+    logger.info("Initializing output image...")
     output = np.zeros(image.shape, dtype=np.uint8)
 
-    print("Initializing graph...")
+    logger.info("Initializing graph...")
     G = nx.Graph()
     point_to_triangles = {}
 
-    print("Processing triangle coords and mapping neighbors...")
+    logger.info("Processing triangle coords and mapping neighbors...")
     with tqdm(triangles, desc="Processing triangle coords", position=2) as t:
         for triangle in t:
             triangle_coords = triangle.astype(int)
@@ -187,11 +191,50 @@ def image_to_triangles(
             color = G.nodes[node]['color']
             draw_triangle(output, triangle_coords, color)
 
-    print("Saving output image...")
+    logger.info("Saving output image...")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     output_path = os.path.join(output_directory, name, f"{name}_{timestamp}{ext}")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cv2.imwrite(output_path, output)
+def validate_config(config):
+    logger = logging.getLogger('Triangulate')
+    try:
+        if not 0 <= config.getint(environment, 'canny_threshold1') <= 255:
+            raise ValueError("Canny Threshold 1 must be between 0 and 255")
+        if not 0 <= config.getint(environment, 'canny_threshold2') <= 255:
+            raise ValueError("Canny Threshold 2 must be between 0 and 255")
+        if not config.getint(environment, 'blur_size') % 2 == 1:
+            raise ValueError("Blur Size must be an odd number")
+        if not 0 <= config.getfloat(environment, 'color_difference_threshold') <= 1:
+            raise ValueError("Color Difference Threshold must be between 0 and 1") 
+        if not 0 <= config.getfloat(environment, 'lightness_adjustment') <= 1:
+            raise ValueError("Lightness Adjustment must be between 0 and 1")
+        if not 0 <= config.getfloat(environment, 'triangle_size_threshold') <= 100:
+            raise ValueError("Triangle Size Threshold must be between 0 and 100")
+        if not os.path.exists(config.get(environment, 'input_directory')) and os.path.isdir(config.get(environment, 'input_directory')):
+            raise ValueError("Input directory is invalid")
+        if not os.path.exists(config.get(environment, 'output_directory')) and os.path.isdir(config.get(environment, 'output_directory')):
+            raise ValueError("Output directory is invalid")
+    except ValueError as e:
+        logger.error(f"Error: {e}")
+        exit(1)
+def setup_logger(output_directory):
+    logger = logging.getLogger('Triangulate')
+    logging.basicConfig(level=logging.INFO)
+    logger.setLevel(logging.DEBUG)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    file_handler = logging.FileHandler(f'{output_directory}/log_{timestamp}.txt')
+    file_handler.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 if __name__ == "__main__":
     config = configparser.ConfigParser()
@@ -199,6 +242,9 @@ if __name__ == "__main__":
     environment = config.get('DEFAULT', 'environment')
     input_directory = config.get(environment, 'input_directory')
     output_directory = config.get(environment, 'output_directory')
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    output_directory = os.path.join(output_directory, 'batch_' + timestamp)
+    os.makedirs(output_directory, exist_ok=True)
     canny_threshold1 = config.getint(environment, 'canny_threshold1')
     canny_threshold2 = config.getint(environment, 'canny_threshold2')
     blur_size = config.getint(environment, 'blur_size')
@@ -206,11 +252,16 @@ if __name__ == "__main__":
     lightness_adjustment = config.getfloat(environment, 'lightness_adjustment')
     intermediate_gen = config.getboolean(environment, 'intermediate_gen')
     triangle_size_threshold = config.getfloat(environment, 'triangle_size_threshold')
-
+    setup_logger(output_directory)
+    logger = logging.getLogger('Triangulate')
+    logger.info('Program started')
+    validate_config(config)
+    valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
     image_files = glob.glob(os.path.join(input_directory, '*'))
+    image_files = [f for f in image_files if os.path.splitext(f)[1].lower() in valid_extensions]
     with tqdm(total=len(image_files), desc="Processing all images", position=0) as pbar:
         for image_file in image_files:
-            print(f'Processing {image_file}:')
+            logger.info(f'Processing {image_file}:')
             image_to_triangles(
                 image_file, 
                 output_directory, 
